@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Local Image Compressor (JPG/PNG)</title>
+  <title>Local Image Compressor</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Required for HEIC conversion fallback -->
   <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
@@ -13,7 +13,7 @@
   <div class="max-w-4xl mx-auto">
     <div class="mb-8">
       <h1 class="text-3xl font-bold uppercase tracking-wider text-[#E5FF00] mb-2">Local Image Compressor</h1>
-      <p class="text-gray-400 text-sm">Maintains JPG/PNG formats. Converts HEIC/WebP to JPG. Max dimension: 1440px. Runs entirely in your browser.</p>
+      <p class="text-gray-400 text-sm">Target: < 200KB, Max Dimension: 1440px. (JPGs remain JPGs, everything else outputs as PNG). Runs entirely in your browser.</p>
     </div>
 
     <!-- Drag & Drop Zone -->
@@ -45,7 +45,7 @@
     const fileList = document.getElementById('fileList');
     const downloadAllBtn = document.getElementById('downloadAllBtn');
     
-    let processedFiles = []; 
+    let processedFiles = []; // Store blobs for "Download All"
 
     // UI Feedback for Drag & Drop
     dropZone.addEventListener('dragover', (e) => {
@@ -62,7 +62,7 @@
     });
     fileInput.addEventListener('change', (e) => {
       if (e.target.files.length) handleFiles(e.target.files);
-      e.target.value = ''; 
+      e.target.value = ''; // Reset
     });
 
     const formatBytes = (bytes) => {
@@ -73,22 +73,28 @@
       return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     };
 
-    // MEMORY-SAFE CONVERTER (PNG/JPG Logic)
-    async function compressImageMemorySafe(file, maxDim = 1440, targetSizeKb = 250) {
+    // FORMAT-AWARE MEMORY-SAFE CONVERTER
+    async function compressImageMemorySafe(file, maxDim = 1440, targetSizeKb = 200) {
       const originalNameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
       const isHeic = file.type === 'image/heic' || file.type === 'image/heif' || file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif');
 
-      // 1. Determine Output Format
-      // If it's a PNG, keep it PNG. Otherwise, force to JPG (including WebP/HEIC conversions).
-      let outMime = 'image/jpeg';
-      let outExt = '.jpg';
-      
-      if (file.type === 'image/png') {
-        outMime = 'image/png';
-        outExt = '.png';
+      // Determine Target Output Format
+      let outputMimeType = 'image/png';
+      let outputExtension = '.png';
+
+      if (file.type === 'image/jpeg' || file.type === 'image/jpg') {
+        outputMimeType = 'image/jpeg';
+        outputExtension = '.jpg';
+      } else if (file.type === 'image/png') {
+        outputMimeType = 'image/png';
+        outputExtension = '.png';
+      } else {
+        // Anything else (WebP, HEIC, etc.) becomes PNG
+        outputMimeType = 'image/png';
+        outputExtension = '.png';
       }
 
-      const finalName = `${originalNameWithoutExt}${outExt}`;
+      const finalName = `${originalNameWithoutExt}${outputExtension}`;
       let imageSource = null;
 
       try {
@@ -108,7 +114,7 @@
         return file;
       }
 
-      // 2. Initial dimensional scale-down to maxDim
+      // Initial dimensional scale-down to maxDim
       let width = imageSource.width;
       let height = imageSource.height;
       if (width > maxDim || height > maxDim) {
@@ -131,12 +137,6 @@
         return file;
       }
 
-      // If converting a transparent PNG or WebP to JPG, fill background with white first
-      if (outMime === 'image/jpeg') {
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, width, height);
-      }
-
       ctx.drawImage(imageSource, 0, 0, width, height);
 
       // Free RAM instantly
@@ -144,32 +144,36 @@
 
       const targetBytes = targetSizeKb * 1024;
       let finalBlob = null;
-      const getCanvasBlob = (q) => new Promise((resolve) => canvas.toBlob(resolve, outMime, q));
+      const getCanvasBlob = (q) => new Promise((resolve) => canvas.toBlob(resolve, outputMimeType, q));
 
-      let quality = 0.95; 
-      finalBlob = await getCanvasBlob(quality);
+      // STEP 1: Iterative Quality Adjustments (ONLY for JPEG, PNG ignores quality)
+      let currentQuality = 0.95;
 
-      // 3. Iterative Quality Adjustments (Only works for JPGs, Canvas ignores this for PNG)
-      if (outMime === 'image/jpeg') {
-        let minQ = 0.70; 
+      if (outputMimeType === 'image/jpeg') {
+        let minQ = 0.50; 
         let maxQ = 1.0;
         let attempts = 0;
         const maxAttempts = 5;
 
+        finalBlob = await getCanvasBlob(currentQuality);
+
         while (finalBlob && finalBlob.size > targetBytes && attempts < maxAttempts) {
-          maxQ = quality;
-          quality = (minQ + maxQ) / 2; 
-          finalBlob = await getCanvasBlob(quality);
+          maxQ = currentQuality;
+          currentQuality = (minQ + maxQ) / 2; 
+          finalBlob = await getCanvasBlob(currentQuality);
           attempts++;
         }
+      } else {
+        // Just generate the PNG once at full canvas dimensions
+        finalBlob = await getCanvasBlob(1.0);
       }
 
-      // 4. Dimensional Scaling Fallback
-      // If JPG is still too big, or if it's a PNG (which didn't benefit from quality reduction)
+      // STEP 2: Dimensional Scaling Fallback (15% reduction)
+      // If the file is still too big (especially heavy PNGs), we must shrink physical dimensions.
       let currentWidth = width;
       let currentHeight = height;
       
-      while (finalBlob && finalBlob.size > targetBytes && currentWidth > 600) {
+      while (finalBlob && finalBlob.size > targetBytes && currentWidth > 400) {
         currentWidth = Math.round(currentWidth * 0.85);
         currentHeight = Math.round(currentHeight * 0.85);
 
@@ -179,12 +183,8 @@
         const tempCtx = tempCanvas.getContext('2d');
         
         if (tempCtx) {
-          if (outMime === 'image/jpeg') {
-             tempCtx.fillStyle = '#FFFFFF';
-             tempCtx.fillRect(0, 0, currentWidth, currentHeight);
-          }
           tempCtx.drawImage(canvas, 0, 0, currentWidth, currentHeight);
-          finalBlob = await new Promise((resolve) => tempCanvas.toBlob(resolve, outMime, quality));
+          finalBlob = await new Promise((resolve) => tempCanvas.toBlob(resolve, outputMimeType, currentQuality));
         }
       }
 
@@ -194,7 +194,7 @@
 
       if (!finalBlob) return file;
 
-      return new File([finalBlob], finalName, { type: outMime });
+      return new File([finalBlob], finalName, { type: outputMimeType });
     }
 
     async function handleFiles(files) {
@@ -215,7 +215,7 @@
             <span class="text-xs text-gray-400">Original: ${formatBytes(file.size)}</span>
           </div>
           <div id="status-${fileId}" class="flex items-center gap-3 text-sm">
-            <span class="animate-pulse text-[#E5FF00]">Processing...</span>
+            <span class="animate-pulse text-[#E5FF00]">Compressing...</span>
           </div>
         `;
         fileList.appendChild(row);
@@ -234,11 +234,11 @@
         statusDiv.innerHTML = `
           <div class="text-right mr-4 hidden sm:block">
             <div class="text-[#E5FF00] font-bold">${formatBytes(compressedFile.size)}</div>
-            <div class="text-xs ${savings > 0 ? 'text-green-400' : 'text-gray-400'}">${savings > 0 ? '-' : ''}${savings}%</div>
+            <div class="text-xs text-green-400">-${savings}%</div>
           </div>
           <button onclick="downloadFile('${objectUrl}', '${compressedFile.name}')" class="bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded text-xs font-bold uppercase tracking-widest transition-colors flex items-center">
             <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-            Save ${compressedFile.name.split('.').pop().toUpperCase()}
+            Save
           </button>
         `;
       }
